@@ -48,6 +48,7 @@ def build_dashboard(
     csv_path: str | Path | None = None,
     output_path: str | Path | None = None,
     milestones_path: str | Path | None = None,
+    temperatures_path: str | Path | None = None,
 ) -> None:
     """
     Load the PDB annual statistics CSV and build an interactive HTML dashboard
@@ -57,6 +58,7 @@ def build_dashboard(
         csv_path: Path to the CSV file. Defaults to the Sheet1 file in the same directory.
         output_path: Path for the output HTML file. Defaults to pdb_dashboard.html.
         milestones_path: Path to milestones CSV (Year, Milestone). Defaults to milestones.csv.
+        temperatures_path: Path to temperature depositions CSV. Defaults to depositions_by_temperature.csv.
     """
     if csv_path is None:
         csv_path = Path(__file__).parent / "PDB Annual per method - Sheet1.csv"
@@ -64,6 +66,8 @@ def build_dashboard(
         output_path = Path(__file__).parent / "pdb_dashboard.html"
     if milestones_path is None:
         milestones_path = Path(__file__).parent / "milestones.csv"
+    if temperatures_path is None:
+        temperatures_path = Path(__file__).parent / "depositions_by_temperature.csv"
 
     df = pd.read_csv(csv_path)
     milestones_df = pd.DataFrame(columns=["Year", "Milestone"])
@@ -124,11 +128,71 @@ def build_dashboard(
         ),
     )
 
+    # Temperature-based X-ray breakdown: Cryogenic X-ray, Room temp X-ray, Others (stacked)
+    n_temp_traces = 0
+    if Path(temperatures_path).exists():
+        try:
+            df_temp = pd.read_csv(temperatures_path)
+            if not df_temp.empty and "Year" in df_temp.columns:
+                room_col = [c for c in df_temp.columns if "273" in c or "Room" in c.lower()]
+                cryo_col = [c for c in df_temp.columns if "150" in c or "Cryo" in c.lower()]
+                if room_col and cryo_col:
+                    df_merged = df[["Year", "Number of Structures Released Annually X-ray"]].merge(
+                        df_temp[["Year", room_col[0], cryo_col[0]]],
+                        on="Year",
+                        how="inner",
+                    )
+                    xray_annual = df_merged["Number of Structures Released Annually X-ray"].values
+                    room_temp = df_merged[room_col[0]].values
+                    cryogenic = df_merged[cryo_col[0]].values
+                    others = np.maximum(0, xray_annual - room_temp - cryogenic)
+
+                    stackgroup = "xray_temp"
+                    fig_annual.add_trace(
+                        go.Scatter(
+                            x=df_merged["Year"],
+                            y=room_temp,
+                            name="Room temp X-ray",
+                            legendgroup="xray-temp",
+                            stackgroup=stackgroup,
+                            mode="lines",
+                            line=dict(width=0),
+                            fillcolor="rgba(255,69,0,0.6)",
+                        ),
+                    )
+                    fig_annual.add_trace(
+                        go.Scatter(
+                            x=df_merged["Year"],
+                            y=cryogenic,
+                            name="Cryogenic X-ray",
+                            legendgroup="xray-temp",
+                            stackgroup=stackgroup,
+                            mode="lines",
+                            line=dict(width=0),
+                            fillcolor="rgba(0,255,255,0.6)",
+                        ),
+                    )
+                    fig_annual.add_trace(
+                        go.Scatter(
+                            x=df_merged["Year"],
+                            y=others,
+                            name="Others",
+                            legendgroup="xray-temp",
+                            stackgroup=stackgroup,
+                            mode="lines",
+                            line=dict(width=0),
+                            fillcolor="rgba(136,136,136,0.6)",
+                        ),
+                    )
+                    n_temp_traces = 3
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
+            pass
+
     # Fit sigmoids to annual curves and extend to 2040
     years_extended = np.arange(df["Year"].min(), 2041).tolist()
     sigmoid_params = {}
     sigmoid_trace_indices = {}
-    trace_idx = 2  # First sigmoid trace index (after X-ray and cryoEM data traces)
+    trace_idx = 2 + n_temp_traces  # First sigmoid trace index
     for col, color, name, legendgroup, key in [
         ("Number of Structures Released Annually X-ray", xray_color, "X-ray (sigmoid fit)", "X-ray-sigmoid", "xray"),
         ("Number of Structures Released Annually cryoEM", cryoem_color, "cryoEM (sigmoid fit)", "cryoEM-sigmoid", "cryoem"),
@@ -271,6 +335,7 @@ def build_dashboard(
                 yanchor="top",
                 font=dict(size=10, color="#555"),
                 xanchor="center",
+                textangle=-35,
             )
         )
 
@@ -324,7 +389,6 @@ def build_dashboard(
         annotations=annotations,
     )
 
-    # Create HTML with charts + data table
     annual_html = fig_annual.to_html(full_html=False, include_plotlyjs="cdn", div_id="annual-chart")
     total_html = fig_total.to_html(full_html=False, include_plotlyjs=False, div_id="total-chart")
 
@@ -453,6 +517,22 @@ def build_dashboard(
     }}
 
     document.addEventListener('DOMContentLoaded', function() {{
+        const gd = document.getElementById('annual-chart');
+        const btnLinear = document.getElementById('scale-linear');
+        const btnLog = document.getElementById('scale-log');
+        if (gd && btnLinear && btnLog && typeof Plotly !== 'undefined') {{
+            btnLinear.addEventListener('click', function() {{
+                Plotly.relayout(gd, {{ yaxis: {{ type: 'linear' }} }});
+                btnLinear.classList.add('active');
+                btnLog.classList.remove('active');
+            }});
+            btnLog.addEventListener('click', function() {{
+                Plotly.relayout(gd, {{ yaxis: {{ type: 'log', range: [0, 5.5] }} }});
+                btnLog.classList.add('active');
+                btnLinear.classList.remove('active');
+            }});
+        }}
+
         ['xray', 'cryoem'].forEach(key => {{
             if (!sigmoidParams[key]) return;
             ['L', 'k', 'x0', 'b'].forEach(param => {{
@@ -478,7 +558,10 @@ def build_dashboard(
         body {{ font-family: system-ui, -apple-system, sans-serif; margin: 2rem; max-width: 1200px; color: #333; }}
         h1 {{ font-weight: 600; letter-spacing: -0.02em; }}
         .intro {{ color: #666; margin-bottom: 1.5rem; }}
-        .chart-section {{ margin-bottom: 0; }}
+        .chart-section {{ margin-bottom: 0; position: relative; }}
+        .scale-toggle {{ position: absolute; top: 0; right: 0; z-index: 10; }}
+        .scale-toggle button {{ margin-left: 0.25rem; padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: white; }}
+        .scale-toggle button.active {{ background: #0969da; color: white; border-color: #0969da; }}
         .sigmoid-controls {{
             margin: 0 0 1.5rem 0; padding: 1.25rem 1.5rem;
             background: linear-gradient(135deg, #f6f8fa 0%, #eef1f5 100%);
@@ -510,7 +593,14 @@ def build_dashboard(
 <body>
     <h1>PDB Statistics Dashboard</h1>
     <p class="intro">Interactive charts and data table. Hover for details, zoom, pan, and use the legend to toggle traces.</p>
-    <div class="chart-section">{annual_html}</div>
+    <div class="chart-section">
+        <div class="scale-toggle">
+            <span>Y-axis:</span>
+            <button id="scale-linear" class="active">Linear</button>
+            <button id="scale-log">Log</button>
+        </div>
+        {annual_html}
+    </div>
     {controls_html}
     <div class="total-section">{total_html}</div>
     {controls_script}
