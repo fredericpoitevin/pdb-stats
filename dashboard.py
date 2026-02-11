@@ -16,6 +16,11 @@ def sigmoid(x: np.ndarray, L: float, k: float, x0: float, b: float) -> np.ndarra
     return L / (1 + np.exp(-k * (x - x0))) + b
 
 
+def exponential(x: np.ndarray, a: float, k: float, x0: float, b: float) -> np.ndarray:
+    """Exponential growth: a * exp(k*(x - x0)) + b"""
+    return a * np.exp(k * (x - x0)) + b
+
+
 def sigmoid_jacobian(x: np.ndarray, L: float, k: float, x0: float, b: float) -> np.ndarray:
     """Jacobian of sigmoid w.r.t. (L, k, x0, b) at each x. Returns shape (n, 4)."""
     exp_term = np.exp(-k * (x - x0))
@@ -300,6 +305,45 @@ def build_dashboard(
                 }
                 sigmoid_trace_indices["xray_plus_mfx"] = trace_idx
                 trace_idx += 1
+
+            # cryoEM only: add exponential fit (adjusted)
+            if key == "cryoem":
+                df_fit_c = df_fit[df_fit[col] > 0]
+                if len(df_fit_c) >= 4:
+                    x_data_c = df_fit_c["Year"].values.astype(float)
+                    y_data_c = df_fit_c[col].values.astype(float)
+                    try:
+                        # Initial guess: a~max, k~0.2, x0~first year, b~0
+                        p0_exp = (y_data_c.max(), 0.2, x_data_c.min(), 0.0)
+                        popt_exp, _ = curve_fit(
+                            exponential, x_data_c, y_data_c,
+                            p0=p0_exp, maxfev=20000,
+                            bounds=([0, 0, 1970, -1000], [1e6, 2, 2050, 10000]),
+                        )
+                        a, k, x0_exp, b_exp = popt_exp
+                        years_arr = np.array(years_extended)
+                        y_exp = np.maximum(exponential(years_arr, *popt_exp), 0)
+                        fig_annual.add_trace(
+                            go.Scatter(
+                                x=years_extended,
+                                y=y_exp.tolist(),
+                                name="cryoEM (exponential adjusted)",
+                                legendgroup="cryoEM-exp-adj",
+                                mode="lines",
+                                line=dict(width=2, color=cryoem_color, dash="dot"),
+                            ),
+                        )
+                        sigmoid_params["cryoem_exp"] = {
+                            "a": float(a), "k": float(k), "x0": float(x0_exp), "b": float(b_exp),
+                            "a_min": max(0.1, a * 0.1), "a_max": a * 3,
+                            "k_min": 0.01, "k_max": 1,
+                            "x0_min": 1970, "x0_max": 2050,
+                            "b_min": max(-1000, b_exp - 500), "b_max": min(5000, b_exp + 500),
+                        }
+                        sigmoid_trace_indices["cryoem_exp"] = trace_idx
+                        trace_idx += 1
+                    except (RuntimeError, ValueError):
+                        pass
         except (RuntimeError, ValueError):
             pass
 
@@ -352,6 +396,7 @@ def build_dashboard(
         annotations=annotations,
     )
     fig_annual.update_xaxes(range=[df["Year"].min() - 1, 2041])
+    fig_annual.update_yaxes(range=[0, 15000])
 
     # Total entries chart
     fig_total = go.Figure()
@@ -392,16 +437,44 @@ def build_dashboard(
     annual_html = fig_annual.to_html(full_html=False, include_plotlyjs="cdn", div_id="annual-chart")
     total_html = fig_total.to_html(full_html=False, include_plotlyjs=False, div_id="total-chart")
 
+    # Build table with all plot-relevant columns
+    df_table = df_display.copy()
+    if Path(temperatures_path).exists():
+        try:
+            df_temp = pd.read_csv(temperatures_path)
+            if not df_temp.empty and "Year" in df_temp.columns:
+                room_col = [c for c in df_temp.columns if "273" in c or "Room" in c.lower()]
+                cryo_col = [c for c in df_temp.columns if "150" in c or "Cryo" in c.lower()]
+                if room_col and cryo_col:
+                    df_table = df_table.merge(
+                        df_temp[["Year", room_col[0], cryo_col[0]]],
+                        on="Year",
+                        how="left",
+                    )
+                    df_table["Others"] = np.maximum(
+                        0,
+                        df_table["Annual X-ray"].fillna(0) - df_table[room_col[0]].fillna(0) - df_table[cryo_col[0]].fillna(0),
+                    )
+                    df_table = df_table.rename(columns={
+                        room_col[0]: "Room temp X-ray",
+                        cryo_col[0]: "Cryogenic X-ray",
+                    })
+                    # Reorder: Year, Annual X-ray, Room temp X-ray, Cryogenic X-ray, Others, Total X-ray, Annual cryoEM, Total cryoEM
+                    cols = ["Year", "Annual X-ray", "Room temp X-ray", "Cryogenic X-ray", "Others", "Total X-ray", "Annual cryoEM", "Total cryoEM"]
+                    df_table = df_table[[c for c in cols if c in df_table.columns]]
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
+            pass
+
     table_fig = go.Figure(
         data=[
             go.Table(
                 header=dict(
-                    values=list(df_display.columns),
+                    values=list(df_table.columns),
                     fill_color="paleturquoise",
                     align="left",
                 ),
                 cells=dict(
-                    values=[df_display[col] for col in df_display.columns],
+                    values=[df_table[col].astype(str) for col in df_table.columns],
                     fill_color="lavender",
                     align="left",
                 ),
@@ -422,20 +495,28 @@ def build_dashboard(
         "x0": ("📍", "Midpoint", "Year of inflection point"),
         "b": ("▬", "Floor", "Baseline / minimum value"),
     }
+    param_info_exp = {
+        "a": ("↕", "Scale", "Exponential amplitude"),
+        "k": ("↗", "Rate", "Growth rate (1/year)"),
+        "x0": ("📍", "Ref year", "Reference year"),
+        "b": ("▬", "Floor", "Baseline offset"),
+    }
 
     # Build sigmoid controls HTML and JS
     controls_html = ""
     controls_script = ""
     if sigmoid_params:
         controls_html = '<div class="sigmoid-controls"><h3>Sigmoid fit parameters</h3><p class="sigmoid-hint">Adjust the parameters to explore scenarios; the <strong>adjusted</strong> curve updates in real time. <strong>X-ray + MFX</strong> is the sum of X-ray (adjusted) and the MFX effect sigmoid. Use the legend to toggle traces.</p><div class="param-groups">'
-        for key, label in [("xray", "X-ray"), ("mfx", "MFX effect"), ("cryoem", "cryoEM")]:
+        for key, label in [("xray", "X-ray"), ("mfx", "MFX effect"), ("cryoem", "cryoEM"), ("cryoem_exp", "cryoEM exponential")]:
             if key not in sigmoid_params:
                 continue
             p = sigmoid_params[key]
-            method_color = xray_color if key == "xray" else (xray_color if key == "mfx" else cryoem_color)
+            method_color = xray_color if key in ("xray", "mfx") else cryoem_color
+            params_to_use = ["a", "k", "x0", "b"] if key == "cryoem_exp" else ["L", "k", "x0", "b"]
+            info_dict = param_info_exp if key == "cryoem_exp" else param_info
             controls_html += f'<div class="param-group"><h4><span class="method-label" style="color: {method_color}">●</span> {label}</h4><div class="sliders">'
-            for param in ["L", "k", "x0", "b"]:
-                icon, param_label, tooltip = param_info[param]
+            for param in params_to_use:
+                icon, param_label, tooltip = info_dict[param]
                 v, vmin, vmax = p[param], p[f"{param}_min"], p[f"{param}_max"]
                 step = (vmax - vmin) / 200 if vmax != vmin else 0.01
                 controls_html += f'''
@@ -456,6 +537,10 @@ def build_dashboard(
 
     function sigmoid(x, L, k, x0, b) {{
         return L / (1 + Math.exp(-k * (x - x0))) + b;
+    }}
+
+    function exponential(x, a, k, x0, b) {{
+        return a * Math.exp(k * (x - x0)) + b;
     }}
 
     let xrayAdjustedY = null;
@@ -516,13 +601,32 @@ def build_dashboard(
         updateXrayPlusMfx();
     }}
 
+    function updateCryoemExp() {{
+        const p = sigmoidParams.cryoem_exp;
+        if (!p) return;
+        const a = parseFloat(document.getElementById('cryoem_exp-a').value);
+        const k = parseFloat(document.getElementById('cryoem_exp-k').value);
+        const x0 = parseFloat(document.getElementById('cryoem_exp-x0').value);
+        const b = parseFloat(document.getElementById('cryoem_exp-b').value);
+        p.a = a; p.k = k; p.x0 = x0; p.b = b;
+        document.getElementById('cryoem_exp-a-val').textContent = a.toFixed(2);
+        document.getElementById('cryoem_exp-k-val').textContent = k.toFixed(2);
+        document.getElementById('cryoem_exp-x0-val').textContent = x0.toFixed(2);
+        document.getElementById('cryoem_exp-b-val').textContent = b.toFixed(2);
+        const y = yearsExtended.map(x => Math.max(0, exponential(x, a, k, x0, b)));
+        const gd = document.getElementById('annual-chart');
+        if (gd && typeof Plotly !== 'undefined') {{
+            Plotly.restyle(gd, {{ y: [y] }}, [sigmoidTraceIndices.cryoem_exp]);
+        }}
+    }}
+
     document.addEventListener('DOMContentLoaded', function() {{
         const gd = document.getElementById('annual-chart');
         const btnLinear = document.getElementById('scale-linear');
         const btnLog = document.getElementById('scale-log');
         if (gd && btnLinear && btnLog && typeof Plotly !== 'undefined') {{
             btnLinear.addEventListener('click', function() {{
-                Plotly.relayout(gd, {{ yaxis: {{ type: 'linear' }} }});
+                Plotly.relayout(gd, {{ yaxis: {{ type: 'linear', range: [0, 15000] }} }});
                 btnLinear.classList.add('active');
                 btnLog.classList.remove('active');
             }});
@@ -544,6 +648,12 @@ def build_dashboard(
             ['L', 'k', 'x0', 'b'].forEach(param => {{
                 const el = document.getElementById('mfx-' + param);
                 if (el) el.addEventListener('input', updateMfx);
+            }});
+        }}
+        if (sigmoidParams.cryoem_exp) {{
+            ['a', 'k', 'x0', 'b'].forEach(param => {{
+                const el = document.getElementById('cryoem_exp-' + param);
+                if (el) el.addEventListener('input', updateCryoemExp);
             }});
         }}
     }});
@@ -569,9 +679,9 @@ def build_dashboard(
         }}
         .sigmoid-controls h3 {{ margin: 0 0 0.25rem 0; font-size: 0.95rem; font-weight: 600; color: #24292e; }}
         .sigmoid-hint {{ margin: 0 0 1rem 0; font-size: 0.85rem; color: #57606a; }}
-        .param-groups {{ display: flex; flex-wrap: wrap; gap: 2rem; }}
+        .param-groups {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; }}
         .param-group {{
-            flex: 1; min-width: 280px;
+            min-width: 0;
             background: white; padding: 1rem 1.25rem; border-radius: 8px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.06);
         }}
