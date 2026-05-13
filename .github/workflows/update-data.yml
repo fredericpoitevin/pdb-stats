@@ -39,6 +39,7 @@ jobs:
           git add -- \
             "PDB Annual per method - Sheet1.csv" \
             depositions_by_temperature.csv \
+            depositions_by_neutron.csv \
             pdb_dashboard.html
 
           if git diff --cached --quiet; then

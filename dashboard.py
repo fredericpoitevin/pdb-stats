@@ -56,6 +56,7 @@ def build_dashboard(
     output_path: str | Path | None = None,
     milestones_path: str | Path | None = None,
     temperatures_path: str | Path | None = None,
+    neutron_path: str | Path | None = None,
 ) -> None:
     """
     Load the PDB annual statistics CSV and build an interactive HTML dashboard
@@ -66,6 +67,7 @@ def build_dashboard(
         output_path: Path for the output HTML file. Defaults to pdb_dashboard.html.
         milestones_path: Path to milestones CSV (Year, Milestone). Defaults to milestones.csv.
         temperatures_path: Path to temperature depositions CSV. Defaults to depositions_by_temperature.csv.
+        neutron_path: Path to neutron depositions CSV. Defaults to depositions_by_neutron.csv.
     """
     if csv_path is None:
         csv_path = Path(__file__).parent / "PDB Annual per method - Sheet1.csv"
@@ -75,6 +77,8 @@ def build_dashboard(
         milestones_path = Path(__file__).parent / "milestones.csv"
     if temperatures_path is None:
         temperatures_path = Path(__file__).parent / "depositions_by_temperature.csv"
+    if neutron_path is None:
+        neutron_path = Path(__file__).parent / "depositions_by_neutron.csv"
 
     df = pd.read_csv(csv_path)
     milestones_df = pd.DataFrame(columns=["Year", "Milestone"])
@@ -109,6 +113,7 @@ def build_dashboard(
     # Shared colors for consistent styling
     xray_color = "#ff7f0e"
     cryoem_color = "#1f77b4"
+    neutron_color = "#2ca02c"
     room_temp_xray_color = "#ff4500"  # rgb(255,69,0); same hue as Room temp X-ray stack fill
     room_temp_xray_fill = _hex_to_rgba(room_temp_xray_color, 0.6)
     today = date.today()
@@ -235,6 +240,15 @@ def build_dashboard(
         except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
             pass
 
+    df_neutron = None
+    if Path(neutron_path).exists():
+        try:
+            _ndf = pd.read_csv(neutron_path)
+            if not _ndf.empty and "Year" in _ndf.columns and "Annual Neutron" in _ndf.columns:
+                df_neutron = _ndf
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
+            pass
+
     annual_traces: list = []
     trace_idx = 0
     ytd_lbl = f"to date ({current_year})"
@@ -267,11 +281,12 @@ def build_dashboard(
     # Requires layout.legend.traceorder "grouped" — "normal" follows data order and ignores ranks.
     LR_X_MAIN, LR_X_YTD, LR_X_YE = 100, 110, 120
     LR_X_SIG = 130
-    LR_RT_ROOM, LR_RT_PROJ, LR_RT_CRYO, LR_RT_OTH = 140, 150, 160, 170
+    LR_RT_ROOM, LR_RT_YTD_RT, LR_RT_PROJ, LR_RT_CRYO, LR_RT_OTH = 140, 145, 150, 160, 170
     LR_E_MAIN, LR_E_YTD, LR_E_YE = 200, 210, 220
     LR_E_SIG, LR_E_EXP = 230, 240
+    LR_N_MAIN, LR_N_YTD, LR_N_YE = 300, 310, 320
 
-    # --- Background: sigmoid CI fills (drawn first) ---
+    # Sigmoid CI fills (95% confidence bands — shown over the full forecast horizon)
     for key in ("xray", "cryoem"):
         sp = sigmoid_prep.get(key)
         if sp is None:
@@ -311,32 +326,34 @@ def build_dashboard(
     # --- Background: temperature stacks ---
     n_temp_traces = 0
     if df_merged is not None and room_col and cryo_col:
-        xray_annual = df_merged["Number of Structures Released Annually X-ray"].values
-        room_temp = df_merged[room_col[0]].values
-        cryogenic = df_merged[cryo_col[0]].values
-        others = np.maximum(0, xray_annual - room_temp - cryogenic)
-        stackgroup = "xray_temp"
-        temp_specs = [
-            (room_temp, "Room temp X-ray", room_temp_xray_fill, LR_RT_ROOM),
-            (cryogenic, "Cryogenic X-ray", "rgba(0,255,255,0.6)", LR_RT_CRYO),
-            (others, "Others", "rgba(136,136,136,0.6)", LR_RT_OTH),
-        ]
-        for y_vals, tname, fillcolor, rank_lr in temp_specs:
-            _annual_append(
-                go.Scatter(
-                    x=df_merged["Year"],
-                    y=y_vals,
-                    name=tname,
-                    legendgroup="xray-temp",
-                    stackgroup=stackgroup,
-                    mode="lines",
-                    line=dict(width=0),
-                    fillcolor=fillcolor,
-                    showlegend=True,
-                    legendrank=rank_lr,
-                ),
-            )
-        n_temp_traces = 3
+        df_stack = df_merged[df_merged["Year"] < current_year]
+        if not df_stack.empty:
+            xray_annual = df_stack["Number of Structures Released Annually X-ray"].values
+            room_temp = df_stack[room_col[0]].values
+            cryogenic = df_stack[cryo_col[0]].values
+            others = np.maximum(0, xray_annual - room_temp - cryogenic)
+            stackgroup = "xray_temp"
+            temp_specs = [
+                (room_temp, "Room temp X-ray", room_temp_xray_fill, LR_RT_ROOM),
+                (cryogenic, "Cryogenic X-ray", "rgba(0,255,255,0.6)", LR_RT_CRYO),
+                (others, "Others", "rgba(136,136,136,0.6)", LR_RT_OTH),
+            ]
+            for y_vals, tname, fillcolor, rank_lr in temp_specs:
+                _annual_append(
+                    go.Scatter(
+                        x=df_stack["Year"],
+                        y=y_vals,
+                        name=tname,
+                        legendgroup="xray-temp",
+                        stackgroup=stackgroup,
+                        mode="lines",
+                        line=dict(width=0),
+                        fillcolor=fillcolor,
+                        showlegend=True,
+                        legendrank=rank_lr,
+                    ),
+                )
+            n_temp_traces = 3
 
     def add_annual_method_traces(
         col: str,
@@ -426,6 +443,32 @@ def build_dashboard(
         LR_E_YE,
     )
 
+    # Room temp X-ray YTD (same marker style as main annual traces)
+    if has_curr_year and df_merged is not None and room_col and not row_rt_curr.empty:
+        _ry = float(row_rt_curr.iloc[0][room_col[0]])
+        if np.isfinite(_ry) and _ry >= 0:
+            _annual_append(
+                go.Scatter(
+                    x=[current_year],
+                    y=[_ry],
+                    name=f"Room temp X-ray to date ({current_year})",
+                    legendgroup="xray-temp",
+                    showlegend=True,
+                    legendrank=LR_RT_YTD_RT,
+                    mode="markers",
+                    marker=dict(
+                        color=room_temp_xray_color,
+                        size=12,
+                        symbol="triangle-up",
+                        line=dict(color=room_temp_xray_color, width=2),
+                    ),
+                    hovertemplate=(
+                        "Room temp X-ray to date<br>"
+                        "Year=%{x}<br>structures = %{y:,.0f}<extra></extra>"
+                    ),
+                ),
+            )
+
     # Room-temp X-ray: run-rate year-end estimate (matches main X-ray projection assumption)
     if has_room_proj:
         room_ytd = float(row_rt_curr.iloc[0][room_col[0]])
@@ -451,6 +494,67 @@ def build_dashboard(
                 ),
             ),
         )
+
+    # Neutron diffraction annual traces
+    if df_neutron is not None:
+        df_n_hist = df_neutron[df_neutron["Year"] < current_year].sort_values("Year")
+        _annual_append(
+            go.Scatter(
+                x=df_n_hist["Year"],
+                y=df_n_hist["Annual Neutron"],
+                name="Neutron",
+                legendgroup="neutron-annual",
+                showlegend=True,
+                legendrank=LR_N_MAIN,
+                mode="lines+markers",
+                line=dict(width=2, color=neutron_color),
+                marker=dict(color=neutron_color),
+            ),
+        )
+        df_n_curr = df_neutron[df_neutron["Year"] == current_year]
+        if not df_n_curr.empty:
+            n_ytd = int(df_n_curr.iloc[0]["Annual Neutron"])
+            n_proj = n_ytd / elapsed_fraction
+            _annual_append(
+                go.Scatter(
+                    x=[current_year],
+                    y=[n_ytd],
+                    name=ytd_lbl,
+                    legendgroup="neutron-annual",
+                    showlegend=True,
+                    legendrank=LR_N_YTD,
+                    mode="markers",
+                    marker=dict(color=neutron_color, size=12, symbol="triangle-up", line=dict(color=neutron_color, width=2)),
+                ),
+            )
+            if not df_n_hist.empty:
+                _annual_append(
+                    go.Scatter(
+                        x=[int(df_n_hist.iloc[-1]["Year"]), current_year],
+                        y=[int(df_n_hist.iloc[-1]["Annual Neutron"]), n_proj],
+                        legendgroup="neutron-annual",
+                        mode="lines",
+                        line=dict(width=2, color=neutron_color),
+                        showlegend=False,
+                    ),
+                )
+            _annual_append(
+                go.Scatter(
+                    x=[current_year],
+                    y=[n_proj],
+                    name=ye_lbl,
+                    legendgroup="neutron-annual",
+                    showlegend=True,
+                    legendrank=LR_N_YE,
+                    mode="markers",
+                    marker=dict(
+                        color=neutron_color,
+                        size=12,
+                        symbol="circle-open",
+                        line=dict(color=neutron_color, width=2),
+                    ),
+                ),
+            )
 
     # --- Foreground: model lines (drawn on top of annual lines) ---
     for key, col, color, legendgroup in [
@@ -641,6 +745,18 @@ def build_dashboard(
             marker=dict(color=cryoem_color),
         ),
     )
+    if df_neutron is not None and "Total Neutron" in df_neutron.columns:
+        fig_total.add_trace(
+            go.Scatter(
+                x=df_neutron["Year"],
+                y=df_neutron["Total Neutron"],
+                name="Neutron",
+                legendgroup="Neutron",
+                mode="lines+markers",
+                line=dict(width=2, color=neutron_color),
+                marker=dict(color=neutron_color),
+            ),
+        )
     fig_total.update_layout(
         title="Total PDB Entries Available by Method",
         xaxis_title="Year",
@@ -678,11 +794,17 @@ def build_dashboard(
                         room_col[0]: "Room temp X-ray",
                         cryo_col[0]: "Cryogenic X-ray",
                     })
-                    # Reorder: Year, Annual X-ray, Room temp X-ray, Cryogenic X-ray, Others, Total X-ray, Annual cryoEM, Total cryoEM
                     cols = ["Year", "Annual X-ray", "Room temp X-ray", "Cryogenic X-ray", "Others", "Total X-ray", "Annual cryoEM", "Total cryoEM"]
                     df_table = df_table[[c for c in cols if c in df_table.columns]]
         except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
             pass
+
+    if df_neutron is not None:
+        df_table = df_table.merge(
+            df_neutron[["Year", "Annual Neutron", "Total Neutron"]],
+            on="Year",
+            how="left",
+        )
 
     table_fig = go.Figure(
         data=[

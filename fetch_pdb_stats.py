@@ -17,6 +17,7 @@ API_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
 ROOT = Path(__file__).parent
 ANNUAL_CSV = ROOT / "PDB Annual per method - Sheet1.csv"
 TEMPERATURE_CSV = ROOT / "depositions_by_temperature.csv"
+NEUTRON_CSV = ROOT / "depositions_by_neutron.csv"
 DASHBOARD_HTML = ROOT / "pdb_dashboard.html"
 
 DATE_ATTRIBUTE = "rcsb_accession_info.initial_release_date"
@@ -163,6 +164,17 @@ def build_temperature_rows(start_year: int, end_year: int) -> list[dict[str, int
     return rows
 
 
+def build_neutron_rows(start_year: int, end_year: int) -> list[dict[str, int]]:
+    rows: list[dict[str, int]] = []
+    total = 0
+    for year in range(start_year, end_year + 1):
+        annual = count_entries([_date_range_node(year), _method_node("Neutron")])
+        total += annual
+        rows.append({"Year": year, "Annual Neutron": annual, "Total Neutron": total})
+        print(f"{year}: neutron={annual:,} (total={total:,})")
+    return rows
+
+
 def _format_count(value: int) -> str:
     return f"{value:,}"
 
@@ -193,6 +205,15 @@ def write_annual_csv(rows: list[dict[str, int]], output_path: Path = ANNUAL_CSV)
 
 def write_temperature_csv(rows: list[dict[str, int]], output_path: Path = TEMPERATURE_CSV) -> None:
     fieldnames = ["Year", "Room temp (273-350 K)", "Cryogenic (<150 K)"]
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Wrote {output_path}")
+
+
+def write_neutron_csv(rows: list[dict[str, int]], output_path: Path = NEUTRON_CSV) -> None:
+    fieldnames = ["Year", "Annual Neutron", "Total Neutron"]
     with output_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -247,6 +268,7 @@ def refresh(
     end_year: int,
     annual_csv: Path = ANNUAL_CSV,
     temperature_csv: Path = TEMPERATURE_CSV,
+    neutron_csv: Path = NEUTRON_CSV,
     dashboard_html: Path = DASHBOARD_HTML,
     rebuild_dashboard: bool = True,
 ) -> None:
@@ -259,6 +281,10 @@ def refresh(
     temperature_rows = build_temperature_rows(start_year, end_year)
     write_temperature_csv(temperature_rows, temperature_csv)
 
+    print("\nRefreshing release-year neutron diffraction counts...")
+    neutron_rows = build_neutron_rows(start_year, end_year)
+    write_neutron_csv(neutron_rows, neutron_csv)
+
     if rebuild_dashboard:
         from dashboard import build_dashboard
 
@@ -266,6 +292,7 @@ def refresh(
             csv_path=annual_csv,
             output_path=dashboard_html,
             temperatures_path=temperature_csv,
+            neutron_path=neutron_csv,
         )
 
 
@@ -275,6 +302,7 @@ def main() -> None:
     parser.add_argument("--end-year", type=int, default=date.today().year)
     parser.add_argument("--annual-csv", type=Path, default=ANNUAL_CSV)
     parser.add_argument("--temperature-csv", type=Path, default=TEMPERATURE_CSV)
+    parser.add_argument("--neutron-csv", type=Path, default=NEUTRON_CSV)
     parser.add_argument("--dashboard-html", type=Path, default=DASHBOARD_HTML)
     parser.add_argument(
         "--no-rebuild-dashboard",
@@ -291,6 +319,7 @@ def main() -> None:
         end_year=args.end_year,
         annual_csv=args.annual_csv,
         temperature_csv=args.temperature_csv,
+        neutron_csv=args.neutron_csv,
         dashboard_html=args.dashboard_html,
         rebuild_dashboard=not args.no_rebuild_dashboard,
     )
