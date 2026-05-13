@@ -57,6 +57,7 @@ def build_dashboard(
     milestones_path: str | Path | None = None,
     temperatures_path: str | Path | None = None,
     neutron_path: str | Path | None = None,
+    nmr_path: str | Path | None = None,
 ) -> None:
     """
     Load the PDB annual statistics CSV and build an interactive HTML dashboard
@@ -68,6 +69,7 @@ def build_dashboard(
         milestones_path: Path to milestones CSV (Year, Milestone). Defaults to milestones.csv.
         temperatures_path: Path to temperature depositions CSV. Defaults to depositions_by_temperature.csv.
         neutron_path: Path to neutron depositions CSV. Defaults to depositions_by_neutron.csv.
+        nmr_path: Path to NMR depositions CSV. Defaults to depositions_by_nmr.csv.
     """
     if csv_path is None:
         csv_path = Path(__file__).parent / "PDB Annual per method - Sheet1.csv"
@@ -79,6 +81,8 @@ def build_dashboard(
         temperatures_path = Path(__file__).parent / "depositions_by_temperature.csv"
     if neutron_path is None:
         neutron_path = Path(__file__).parent / "depositions_by_neutron.csv"
+    if nmr_path is None:
+        nmr_path = Path(__file__).parent / "depositions_by_nmr.csv"
 
     df = pd.read_csv(csv_path)
     milestones_df = pd.DataFrame(columns=["Year", "Milestone"])
@@ -114,6 +118,7 @@ def build_dashboard(
     xray_color = "#ff7f0e"
     cryoem_color = "#1f77b4"
     neutron_color = "#2ca02c"
+    nmr_color = "#9467bd"
     room_temp_xray_color = "#ff4500"  # rgb(255,69,0); same hue as Room temp X-ray stack fill
     room_temp_xray_fill = _hex_to_rgba(room_temp_xray_color, 0.6)
     today = date.today()
@@ -249,6 +254,15 @@ def build_dashboard(
         except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
             pass
 
+    df_nmr = None
+    if Path(nmr_path).exists():
+        try:
+            _nmr_df = pd.read_csv(nmr_path)
+            if not _nmr_df.empty and "Year" in _nmr_df.columns and "Annual NMR" in _nmr_df.columns:
+                df_nmr = _nmr_df
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, KeyError):
+            pass
+
     annual_traces: list = []
     trace_idx = 0
     ytd_lbl = f"to date ({current_year})"
@@ -285,6 +299,7 @@ def build_dashboard(
     LR_E_MAIN, LR_E_YTD, LR_E_YE = 200, 210, 220
     LR_E_SIG, LR_E_EXP = 230, 240
     LR_N_MAIN, LR_N_YTD, LR_N_YE = 300, 310, 320
+    LR_NMR_MAIN, LR_NMR_YTD, LR_NMR_YE = 350, 360, 370
 
     # Sigmoid CI fills (95% confidence bands — shown over the full forecast horizon)
     for key in ("xray", "cryoem"):
@@ -556,6 +571,67 @@ def build_dashboard(
                 ),
             )
 
+    # NMR annual traces
+    if df_nmr is not None:
+        df_nmr_hist = df_nmr[df_nmr["Year"] < current_year].sort_values("Year")
+        _annual_append(
+            go.Scatter(
+                x=df_nmr_hist["Year"],
+                y=df_nmr_hist["Annual NMR"],
+                name="NMR",
+                legendgroup="nmr-annual",
+                showlegend=True,
+                legendrank=LR_NMR_MAIN,
+                mode="lines+markers",
+                line=dict(width=2, color=nmr_color),
+                marker=dict(color=nmr_color),
+            ),
+        )
+        df_nmr_curr = df_nmr[df_nmr["Year"] == current_year]
+        if not df_nmr_curr.empty:
+            nmr_ytd = int(df_nmr_curr.iloc[0]["Annual NMR"])
+            nmr_proj = nmr_ytd / elapsed_fraction
+            _annual_append(
+                go.Scatter(
+                    x=[current_year],
+                    y=[nmr_ytd],
+                    name=ytd_lbl,
+                    legendgroup="nmr-annual",
+                    showlegend=True,
+                    legendrank=LR_NMR_YTD,
+                    mode="markers",
+                    marker=dict(color=nmr_color, size=12, symbol="triangle-up", line=dict(color=nmr_color, width=2)),
+                ),
+            )
+            if not df_nmr_hist.empty:
+                _annual_append(
+                    go.Scatter(
+                        x=[int(df_nmr_hist.iloc[-1]["Year"]), current_year],
+                        y=[int(df_nmr_hist.iloc[-1]["Annual NMR"]), nmr_proj],
+                        legendgroup="nmr-annual",
+                        mode="lines",
+                        line=dict(width=2, color=nmr_color),
+                        showlegend=False,
+                    ),
+                )
+            _annual_append(
+                go.Scatter(
+                    x=[current_year],
+                    y=[nmr_proj],
+                    name=ye_lbl,
+                    legendgroup="nmr-annual",
+                    showlegend=True,
+                    legendrank=LR_NMR_YE,
+                    mode="markers",
+                    marker=dict(
+                        color=nmr_color,
+                        size=12,
+                        symbol="circle-open",
+                        line=dict(color=nmr_color, width=2),
+                    ),
+                ),
+            )
+
     # --- Foreground: model lines (drawn on top of annual lines) ---
     for key, col, color, legendgroup in [
         ("xray", "Number of Structures Released Annually X-ray", xray_color, "X-ray-sigmoid"),
@@ -757,6 +833,18 @@ def build_dashboard(
                 marker=dict(color=neutron_color),
             ),
         )
+    if df_nmr is not None and "Total NMR" in df_nmr.columns:
+        fig_total.add_trace(
+            go.Scatter(
+                x=df_nmr["Year"],
+                y=df_nmr["Total NMR"],
+                name="NMR",
+                legendgroup="NMR",
+                mode="lines+markers",
+                line=dict(width=2, color=nmr_color),
+                marker=dict(color=nmr_color),
+            ),
+        )
     fig_total.update_layout(
         title="Total PDB Entries Available by Method",
         xaxis_title="Year",
@@ -802,6 +890,13 @@ def build_dashboard(
     if df_neutron is not None:
         df_table = df_table.merge(
             df_neutron[["Year", "Annual Neutron", "Total Neutron"]],
+            on="Year",
+            how="left",
+        )
+
+    if df_nmr is not None:
+        df_table = df_table.merge(
+            df_nmr[["Year", "Annual NMR", "Total NMR"]],
             on="Year",
             how="left",
         )
