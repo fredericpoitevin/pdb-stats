@@ -31,6 +31,9 @@ jobs:
       - name: Refresh PDB data
         run: python fetch_pdb_stats.py
 
+      - name: Verify YTD and year-end projections
+        run: python -m pytest tests/test_ytd_projections.py -v
+
       - name: Commit refreshed data
         run: |
           git config user.name "github-actions[bot]"
